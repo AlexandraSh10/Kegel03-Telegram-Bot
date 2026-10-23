@@ -121,11 +121,12 @@ def safe_for_ai(text):
     return text[:MAX_MESSAGE_LENGTH]
 
 
-async def gpt_reply(text, context):
+async def gpt_reply(text, context, storage=None):
     if not OPENAI_API_KEY:
         return None
-    # Keep only short, ephemeral private-chat history, not stored by OpenAI.
-    history = context.user_data.get("history", [])[-2 * MAX_TURNS:]
+    # Never mix a public discussion with a customer's private conversation.
+    storage = context.user_data if storage is None else storage
+    history = storage.get("history", [])[-2 * MAX_TURNS:]
     input_messages = history + [{"role": "user", "content": safe_for_ai(text)}]
     payload = {
         "model": OPENAI_MODEL,
@@ -150,7 +151,7 @@ async def gpt_reply(text, context):
         answer = "\n".join(parts).strip()[:1000]
         if not answer:
             return None
-        context.user_data["history"] = (input_messages + [
+        storage["history"] = (input_messages + [
             {"role": "assistant", "content": answer}
         ])[-2 * MAX_TURNS:]
         return answer
@@ -209,6 +210,13 @@ async def admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Для записи можно использовать DIKIDI.", reply_markup=menu())
 
 
+async def forget(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data.clear()
+    await update.effective_message.reply_text(
+        "Историю диалога в этом боте очистила. 🌷"
+    )
+
+
 async def conversation(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.effective_message
     if not message or not message.text or not update.effective_user or update.effective_user.is_bot:
@@ -217,6 +225,9 @@ async def conversation(update: Update, context: ContextTypes.DEFAULT_TYPE):
     public = update.effective_chat.type != "private"
 
     if public:
+        # Do not answer automatically forwarded channel posts or announcements.
+        if update.effective_chat.type == "channel" or getattr(message, "is_automatic_forward", False):
+            return
         # Channel post comments are messages in the linked discussion supergroup.
         # Answer only questions related to the studio; never discuss personal information in public.
         if PERSONAL_DATA.search(text) or contains(text.casefold(), HEALTH_WORDS):
@@ -225,9 +236,28 @@ async def conversation(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                      do_quote=True)
             return
         response = rule_answer(text, public=True)
+        session_key = f"thread:{getattr(message, 'message_thread_id', None)}:user:{update.effective_user.id}"
+        public_session = context.chat_data.setdefault(session_key, {})
         if response:
+            # Store only sanitized text; each commenter has separate context.
+            history = public_session.get("history", [])
+            history.extend([
+                {"role": "user", "content": safe_for_ai(text)},
+                {"role": "assistant", "content": response},
+            ])
+            public_session["history"] = history[-2 * MAX_TURNS:]
             await message.reply_text(response, reply_markup=menu(), do_quote=True)
-        # Do not post GPT guesses under unrelated discussions.
+        else:
+            # Continue an explicit reply to our bot, but do not interrupt unrelated comments.
+            replied = getattr(message, "reply_to_message", None)
+            addressed_to_bot = bool(
+                replied and getattr(replied, "from_user", None)
+                and replied.from_user.id == context.bot.id
+            )
+            if addressed_to_bot and OPENAI_API_KEY:
+                answer = await gpt_reply(text, context, storage=public_session)
+                if answer:
+                    await message.reply_text(answer, reply_markup=menu(), do_quote=True)
         return
 
     response = rule_answer(text)
@@ -264,7 +294,7 @@ def main():
     commands = {
         "start": start, "help": start, "services": services,
         "booking": booking, "cancel": cancel, "address": address,
-        "contraindications": contraindications, "admin": admin,
+        "contraindications": contraindications, "admin": admin, "forget": forget,
     }
     for name, handler in commands.items():
         app.add_handler(CommandHandler(name, handler))
