@@ -232,6 +232,14 @@ async def conversation(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     response = rule_answer(text)
     if response:
+        # Remember even template-based answers, so a follow-up like "а завтра?"
+        # still has the preceding booking or cancellation context in a private chat.
+        history = context.user_data.get("history", [])
+        history.extend([
+            {"role": "user", "content": safe_for_ai(text)},
+            {"role": "assistant", "content": response},
+        ])
+        context.user_data["history"] = history[-2 * MAX_TURNS:]
         await message.reply_text(response, reply_markup=menu())
         return
     response = await gpt_reply(text, context)
