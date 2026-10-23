@@ -4,10 +4,11 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from dotenv import load_dotenv
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, ContextTypes
+from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
 
 load_dotenv()
 logging.basicConfig(level=logging.INFO)
+logging.getLogger("httpx").setLevel(logging.WARNING)
 logger = logging.getLogger("kegel03")
 
 ADDRESS = "Улан-Удэ, ул. Бабушкина, 22Б, офис 311, офис-центр «Багульник»"
@@ -81,6 +82,24 @@ async def admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Контакт администратора пока настраивается. Адрес студии: " + ADDRESS
         )
 
+async def group_questions(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Respond only to clear service/booking questions; avoid interrupting group chat."""
+    message = update.effective_message
+    if not message or not message.text:
+        return
+    text = message.text.casefold()
+    if any(word in text for word in ("записаться", "как запис", "онлайн-запись", "свободное время")):
+        await booking(update, context)
+    elif any(word in text for word in ("отменить запись", "перенести запись", "отмена записи")):
+        await cancel(update, context)
+    elif any(word in text for word in ("адрес студии", "где находитесь", "как вас найти")):
+        await address(update, context)
+    elif any(word in text for word in ("противопоказания", "кому нельзя")):
+        await contraindications(update, context)
+    elif any(word in text for word in ("сколько длится", "какие услуги", "что за кресло")):
+        await services(update, context)
+
+
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -112,6 +131,7 @@ def main():
     }
     for name, handler in commands.items():
         app.add_handler(CommandHandler(name, handler))
+    app.add_handler(MessageHandler(filters.ChatType.GROUPS & filters.TEXT & ~filters.COMMAND, group_questions))
     logger.info("Starting Kegel03 bot in polling mode")
     app.run_polling(drop_pending_updates=True)
 
