@@ -45,7 +45,9 @@ HEALTH_WORDS = ("беремен", "боль", "болит", "кровотеч", 
                 "противопоказан", "после родов", "здоровь", "лечени")
 PERSONAL_WORDS = ("личный вопрос", "личного характера", "лично обсуд", "конфиденциаль",
                   "интимн", "связаться с александр", "написать александр",
-                  "живой администратор", "позови администратор", "связаться с администратор")
+                  "живой администратор", "позови администратор", "связаться с администратор",
+                  "консультац", "специалист", "связаться с человеком", "живой человек",
+                  "поговорить с человеком", "поговорить с администратором")
 PERSONAL_DATA = re.compile(r"(?:\+?7|8)[\s\-()]*(?:\d[\s\-()]*){10}|[\w.%-]+@[\w.-]+\.[A-Za-z]{2,}", re.I)
 USERNAME = re.compile(r"(?<!\w)@[A-Za-z0-9_]{5,}")
 
@@ -54,6 +56,9 @@ PROMPT = """Ты вежливый, ненавязчивый администра
 Занятие на кресле Кегель занимает около 30 минут и проходит в одежде.
 Ссылка на настоящую онлайн-запись DIKIDI: https://dikidi.ru/1745954.
 Говори кратко, по-русски, тепло и понятно, без сложных медицинских терминов.
+Понимай смысл обращения и продолжения диалога, даже без точных ключевых слов.
+Просьбы о консультации, специалисте или общении с человеком направляй к Александре.
+В комментариях отвечай на обращения клиентов; на явно посторонние темы кратко обозначь свою роль.
 Учитывай историю диалога, но не выдумывай факты об услугах, ценах, скидках, противопоказаниях.
 Нельзя обещать результат или утверждать, что проблема точно решится.
 КРИТИЧНО: у тебя НЕТ доступа к журналу DIKIDI и нет прав создавать, отменять или переносить запись.
@@ -296,15 +301,10 @@ async def conversation(update: Update, context: ContextTypes.DEFAULT_TYPE):
             public_session["history"] = history[-2 * MAX_TURNS:]
             await message.reply_text(response, reply_markup=menu(), do_quote=True)
         else:
-            # Continue an explicit reply to our bot, but do not interrupt unrelated comments.
-            replied = getattr(message, "reply_to_message", None)
-            addressed_to_bot = bool(
-                replied and getattr(replied, "from_user", None)
-                and replied.from_user.id == context.bot.id
-            )
-            if addressed_to_bot:
-                answer = await gpt_reply(text, context, storage=public_session)
-                await message.reply_text(answer or handoff_reply(), reply_markup=menu(), do_quote=True)
+            # Understand every client comment, including paraphrases and follow-ups.
+            # Sessions remain isolated by discussion thread and commenter.
+            answer = await gpt_reply(text, context, storage=public_session)
+            await message.reply_text(answer or handoff_reply(), reply_markup=menu(), do_quote=True)
         return
 
     response = rule_answer(text)
