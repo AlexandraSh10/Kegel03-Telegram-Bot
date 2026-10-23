@@ -318,11 +318,29 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
     logger.error("Telegram handler error: %s", type(context.error).__name__)
 
 
+
+async def verify_ai_configuration(app: Application):
+    """Read-only authentication probe; never print or transmit the secret to logs."""
+    provider = active_llm_provider()
+    logger.info("AI provider configured: %s", provider or "none")
+    if provider != "openai":
+        return
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            result = await client.get(
+                "https://api.openai.com/v1/models/" + OPENAI_MODEL,
+                headers={"Authorization": "Bearer " + OPENAI_API_KEY},
+            )
+        logger.info("OpenAI API key/model verification: HTTP %s", result.status_code)
+    except httpx.HTTPError as exc:
+        logger.warning("OpenAI API verification could not connect: %s", type(exc).__name__)
+
+
 def main():
     token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
     if not token:
         raise RuntimeError("TELEGRAM_BOT_TOKEN is required")
-    app = Application.builder().token(token).build()
+    app = Application.builder().token(token).post_init(verify_ai_configuration).build()
     commands = {
         "start": start, "help": start, "services": services,
         "booking": booking, "cancel": cancel, "address": address,
