@@ -1,7 +1,7 @@
 """Kegel03 Telegram assistant.
 
 Public group discussions: short replies to service questions.
-Private chat: contextual YandexGPT answers when YANDEX_API_KEY and YANDEX_FOLDER_ID are configured.
+Private chat: contextual OpenAI GPT or YandexGPT answers when appropriate API credentials are configured.
 Booking and cancellation: direct to DIKIDI until authorized, documented write API exists.
 Never claim a slot is available or a booking was changed without confirmation from DIKIDI.
 """
@@ -25,6 +25,9 @@ logger = logging.getLogger("kegel03")
 ADDRESS = "Улан-Удэ, ул. Бабушкина, 22Б, офис 311, офис-центр «Багульник»"
 BOOKING_URL = os.getenv("DIKIDI_BOOKING_URL", "https://dikidi.ru/1745954").strip()
 ADMIN_CONTACT = os.getenv("ADMIN_CONTACT", "").strip()
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4.1-mini").strip()
+LLM_PROVIDER = os.getenv("LLM_PROVIDER", "auto").strip().lower()
 YANDEX_API_KEY = os.getenv("YANDEX_API_KEY", "").strip()
 YANDEX_FOLDER_ID = os.getenv("YANDEX_FOLDER_ID", "").strip()
 YANDEX_MODEL = os.getenv("YANDEX_MODEL", "yandexgpt-5.1").strip()
@@ -122,36 +125,57 @@ def safe_for_ai(text):
     return text[:MAX_MESSAGE_LENGTH]
 
 
+def active_llm_provider():
+    """Use OpenAI when configured, otherwise optional YandexGPT fallback."""
+    if LLM_PROVIDER == "openai":
+        return "openai" if OPENAI_API_KEY else None
+    if LLM_PROVIDER == "yandex":
+        return "yandex" if YANDEX_API_KEY and YANDEX_FOLDER_ID else None
+    if OPENAI_API_KEY:
+        return "openai"
+    if YANDEX_API_KEY and YANDEX_FOLDER_ID:
+        return "yandex"
+    return None
+
+
 async def gpt_reply(text, context, storage=None):
-    if not YANDEX_API_KEY or not YANDEX_FOLDER_ID:
+    provider = active_llm_provider()
+    if not provider:
         return None
-    # Never mix a public discussion with a customer's private conversation.
+    # Don't mix private dialogues of different people or public discussion threads.
     storage = context.user_data if storage is None else storage
     history = storage.get("history", [])[-2 * MAX_TURNS:]
     input_messages = history + [{"role": "user", "content": safe_for_ai(text)}]
-    payload = {
-        "model": f"gpt://{YANDEX_FOLDER_ID}/{YANDEX_MODEL}",
-        "messages": [
-            {"role": "system", "content": (
-                PROMPT + "\nТекущее местное время в Улан-Удэ: "
-                + datetime.now(ZoneInfo("Asia/Irkutsk")).isoformat()
-            )},
-            *input_messages,
-        ],
-        "temperature": 0.3,
-        "max_tokens": 280,
-        "stream": False,
-    }
+    instructions = (
+        PROMPT + "\nТекущее время в Улан-Удэ: "
+        + datetime.now(ZoneInfo("Asia/Irkutsk")).isoformat()
+    )
+    messages = [{"role": "system", "content": instructions}, *input_messages]
+    if provider == "openai":
+        endpoint = "https://api.openai.com/v1/chat/completions"
+        headers = {"Authorization": "Bearer " + OPENAI_API_KEY}
+        payload = {
+            "model": OPENAI_MODEL,
+            "messages": messages,
+            "max_completion_tokens": 300,
+            "temperature": 0.3,
+        }
+    else:
+        endpoint = "https://ai.api.cloud.yandex.net/v1/chat/completions"
+        headers = {
+            "Authorization": "Api-Key " + YANDEX_API_KEY,
+            "OpenAI-Project": YANDEX_FOLDER_ID,
+        }
+        payload = {
+            "model": f"gpt://{YANDEX_FOLDER_ID}/{YANDEX_MODEL}",
+            "messages": messages,
+            "temperature": 0.3,
+            "max_tokens": 280,
+            "stream": False,
+        }
     try:
         async with httpx.AsyncClient(timeout=25.0) as client:
-            res = await client.post(
-                "https://ai.api.cloud.yandex.net/v1/chat/completions",
-                json=payload,
-                headers={
-                    "Authorization": "Api-Key " + YANDEX_API_KEY,
-                    "OpenAI-Project": YANDEX_FOLDER_ID,
-                },
-            )
+            res = await client.post(endpoint, json=payload, headers=headers)
             res.raise_for_status()
             data = res.json()
         answer = (data["choices"][0]["message"]["content"] or "").strip()[:1000]
@@ -161,9 +185,9 @@ async def gpt_reply(text, context, storage=None):
             {"role": "assistant", "content": answer}
         ])[-2 * MAX_TURNS:]
         return answer
-    except (httpx.HTTPError, ValueError, KeyError) as exc:
-        # Log exception type only, never requests, tokens or client messages.
-        logger.warning("YandexGPT request unavailable: %s", type(exc).__name__)
+    except (httpx.HTTPError, ValueError, KeyError, TypeError, IndexError) as exc:
+        # Never log customer messages, API keys or full provider URLs.
+        logger.warning("%s assistant temporarily unavailable: %s", provider, type(exc).__name__)
         return None
 
 
@@ -260,7 +284,7 @@ async def conversation(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 replied and getattr(replied, "from_user", None)
                 and replied.from_user.id == context.bot.id
             )
-            if addressed_to_bot and YANDEX_API_KEY and YANDEX_FOLDER_ID:
+            if addressed_to_bot and active_llm_provider():
                 answer = await gpt_reply(text, context, storage=public_session)
                 if answer:
                     await message.reply_text(answer, reply_markup=menu(), do_quote=True)
@@ -270,12 +294,14 @@ async def conversation(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if response:
         # Remember even template-based answers, so a follow-up like "а завтра?"
         # still has the preceding booking or cancellation context in a private chat.
-        history = context.user_data.get("history", [])
-        history.extend([
-            {"role": "user", "content": safe_for_ai(text)},
-            {"role": "assistant", "content": response},
-        ])
-        context.user_data["history"] = history[-2 * MAX_TURNS:]
+        # Do not retain sensitive health questions in the model context.
+        if not contains(text.casefold(), HEALTH_WORDS):
+            history = context.user_data.get("history", [])
+            history.extend([
+                {"role": "user", "content": safe_for_ai(text)},
+                {"role": "assistant", "content": response},
+            ])
+            context.user_data["history"] = history[-2 * MAX_TURNS:]
         await message.reply_text(response, reply_markup=menu())
         return
     response = await gpt_reply(text, context)
