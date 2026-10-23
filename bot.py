@@ -1,7 +1,7 @@
 """Kegel03 Telegram assistant.
 
 Public group discussions: short replies to service questions.
-Private chat: contextual GPT answers when OPENAI_API_KEY is configured.
+Private chat: contextual YandexGPT answers when YANDEX_API_KEY and YANDEX_FOLDER_ID are configured.
 Booking and cancellation: direct to DIKIDI until authorized, documented write API exists.
 Never claim a slot is available or a booking was changed without confirmation from DIKIDI.
 """
@@ -25,8 +25,9 @@ logger = logging.getLogger("kegel03")
 ADDRESS = "Улан-Удэ, ул. Бабушкина, 22Б, офис 311, офис-центр «Багульник»"
 BOOKING_URL = os.getenv("DIKIDI_BOOKING_URL", "https://dikidi.ru/1745954").strip()
 ADMIN_CONTACT = os.getenv("ADMIN_CONTACT", "").strip()
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
-OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4.1-mini").strip()
+YANDEX_API_KEY = os.getenv("YANDEX_API_KEY", "").strip()
+YANDEX_FOLDER_ID = os.getenv("YANDEX_FOLDER_ID", "").strip()
+YANDEX_MODEL = os.getenv("YANDEX_MODEL", "yandexgpt-5.1").strip()
 APP_BASE_URL = os.getenv("APP_BASE_URL", "https://kegel03-telegram-bot.onrender.com").rstrip("/")
 MAX_TURNS = 5
 MAX_MESSAGE_LENGTH = 1600
@@ -122,33 +123,38 @@ def safe_for_ai(text):
 
 
 async def gpt_reply(text, context, storage=None):
-    if not OPENAI_API_KEY:
+    if not YANDEX_API_KEY or not YANDEX_FOLDER_ID:
         return None
     # Never mix a public discussion with a customer's private conversation.
     storage = context.user_data if storage is None else storage
     history = storage.get("history", [])[-2 * MAX_TURNS:]
     input_messages = history + [{"role": "user", "content": safe_for_ai(text)}]
     payload = {
-        "model": OPENAI_MODEL,
-        "instructions": PROMPT + "\nТекущее местное время: " + datetime.now(ZoneInfo("Asia/Irkutsk")).isoformat(),
-        "input": input_messages,
-        "store": False,
-        "max_output_tokens": 240,
+        "model": f"gpt://{YANDEX_FOLDER_ID}/{YANDEX_MODEL}",
+        "messages": [
+            {"role": "system", "content": (
+                PROMPT + "\nТекущее местное время в Улан-Удэ: "
+                + datetime.now(ZoneInfo("Asia/Irkutsk")).isoformat()
+            )},
+            *input_messages,
+        ],
+        "temperature": 0.3,
+        "max_tokens": 280,
+        "stream": False,
     }
     try:
         async with httpx.AsyncClient(timeout=25.0) as client:
-            res = await client.post("https://api.openai.com/v1/responses", json=payload,
-                                    headers={"Authorization": "Bearer " + OPENAI_API_KEY})
+            res = await client.post(
+                "https://ai.api.cloud.yandex.net/v1/chat/completions",
+                json=payload,
+                headers={
+                    "Authorization": "Api-Key " + YANDEX_API_KEY,
+                    "OpenAI-Project": YANDEX_FOLDER_ID,
+                },
+            )
             res.raise_for_status()
             data = res.json()
-        parts = [
-            part.get("text", "")
-            for item in data.get("output", [])
-            if item.get("type") == "message"
-            for part in item.get("content", [])
-            if part.get("type") == "output_text"
-        ]
-        answer = "\n".join(parts).strip()[:1000]
+        answer = (data["choices"][0]["message"]["content"] or "").strip()[:1000]
         if not answer:
             return None
         storage["history"] = (input_messages + [
@@ -157,7 +163,7 @@ async def gpt_reply(text, context, storage=None):
         return answer
     except (httpx.HTTPError, ValueError, KeyError) as exc:
         # Log exception type only, never requests, tokens or client messages.
-        logger.warning("OpenAI request unavailable: %s", type(exc).__name__)
+        logger.warning("YandexGPT request unavailable: %s", type(exc).__name__)
         return None
 
 
@@ -254,7 +260,7 @@ async def conversation(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 replied and getattr(replied, "from_user", None)
                 and replied.from_user.id == context.bot.id
             )
-            if addressed_to_bot and OPENAI_API_KEY:
+            if addressed_to_bot and YANDEX_API_KEY and YANDEX_FOLDER_ID:
                 answer = await gpt_reply(text, context, storage=public_session)
                 if answer:
                     await message.reply_text(answer, reply_markup=menu(), do_quote=True)
