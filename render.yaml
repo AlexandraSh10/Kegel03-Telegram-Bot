@@ -1,0 +1,13 @@
+services:
+  - type: worker
+    name: kegel03-telegram-bot
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: python bot.py
+    envVars:
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: DIKIDI_BOOKING_URL
+        sync: false
+      - key: ADMIN_CONTACT
+        sync: false
