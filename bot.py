@@ -1,5 +1,7 @@
 import logging
 import os
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from dotenv import load_dotenv
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, ContextTypes
@@ -79,10 +81,29 @@ async def admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Контакт администратора пока настраивается. Адрес студии: " + ADDRESS
         )
 
+class HealthHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain; charset=utf-8")
+        self.end_headers()
+        self.wfile.write(b"Kegel03 bot service online")
+
+    def log_message(self, format, *args):
+        return
+
+
+def start_health_server():
+    port = int(os.getenv("PORT", "10000"))
+    ThreadingHTTPServer(("0.0.0.0", port), HealthHandler).serve_forever()
+
+
 def main():
+    threading.Thread(target=start_health_server, daemon=True).start()
     token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
     if not token:
-        raise RuntimeError("TELEGRAM_BOT_TOKEN отсутствует: задайте секретную переменную на Render.")
+        logger.warning("TELEGRAM_BOT_TOKEN is missing; web health service is running, Telegram bot is NOT active.")
+        threading.Event().wait()
+        return
     app = Application.builder().token(token).build()
     commands = {
         "start": start, "help": start, "services": services,
